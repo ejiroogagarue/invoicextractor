@@ -1,0 +1,220 @@
+/* ReviewInterface.css - Side-by-side PDF viewer layout */
+
+.review-interface {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #f5f5f5;
+}
+
+/* Header */
+.review-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 15px 20px;
+  background: white;
+  border-bottom: 1px solid #e0e0e0;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.review-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+  color: #333;
+}
+
+.back-button {
+  padding: 8px 16px;
+  background: #f0f0f0;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.back-button:hover {
+  background: #e0e0e0;
+}
+
+.review-status .status-badge {
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.status-badge.approved {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.status-badge.review {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* Main Container */
+.review-container {
+  display: flex;
+  flex: 1;
+  gap: 20px;
+  padding: 20px;
+  overflow: hidden;
+}
+
+/* PDF Panel (Left) */
+.pdf-panel {
+  flex: 0 0 45%;
+  display: flex;
+  flex-direction: column;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+}
+
+.pdf-panel .panel-header {
+  padding: 15px 20px;
+  border-bottom: 1px solid #e0e0e0;
+  background: #fafafa;
+}
+
+.pdf-panel .panel-header h3 {
+  margin: 0 0 5px 0;
+  font-size: 1rem;
+  color: #333;
+}
+
+.pdf-panel .filename {
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.pdf-viewer-wrapper {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+}
+
+.invoice-pdf-viewer {
+  height: 100%;
+  overflow: auto;
+  padding: 10px;
+  background: #f9f9f9;
+}
+
+/* Data Panel (Right) */
+.data-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+}
+
+.data-panel .panel-header {
+  padding: 15px 20px;
+  border-bottom: 1px solid #e0e0e0;
+  background: #fafafa;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.data-panel .panel-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #333;
+}
+
+.confidence-indicator {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #059669;
+  background: #d1fae5;
+  padding: 4px 12px;
+  border-radius: 4px;
+}
+
+/* Search and highlight indicators */
+.search-indicator {
+  padding: 8px 15px;
+  background: #dbeafe;
+  color: #1e40af;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border-left: 3px solid #3b82f6;
+  margin: 10px 20px;
+  animation: fadeIn 0.3s ease;
+}
+
+.highlight-info {
+  padding: 8px 15px;
+  background: #d1fae5;
+  color: #065f46;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border-left: 3px solid #10b981;
+  margin: 10px 20px;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* PDF Highlight Animation */
+@keyframes highlightPulse {
+  0% {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Responsive Design */
+@media (max-width: 1024px) {
+  .review-container {
+    flex-direction: column;
+  }
+
+  .pdf-panel {
+    flex: 0 0 400px;
+  }
+
+  .data-panel {
+    flex: 1;
+    min-height: 500px;
+  }
+}
+
+@media (max-width: 768px) {
+  .review-header {
+    flex-direction: column;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .pdf-panel {
+    flex: 0 0 300px;
+  }
+}
+
