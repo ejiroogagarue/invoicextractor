@@ -1,400 +1,314 @@
 /**
  * App.tsx - Main Application Component
- * 
+ *
  * DATA FLOW OVERVIEW:
  * ===================
  * This is the orchestrator for the entire invoice processing flow.
- * 
- * FLOW STAGES:
- * ------------
- * 1. UPLOAD MODE: User selects invoice files
- *    → UploadArea component handles file selection
- *    → Files stored in state
- * 
- * 2. PROCESSING MODE: Files sent to backend
- *    → handleProcessInvoices() sends FormData to backend
- *    → Backend: POST /ocr/invoice/extract-batch
- *    → ProcessingView shows animated progress
- * 
- * 3. DASHBOARD MODE: Display results
- *    → Backend returns aggregated data
- *    → Dashboard component displays summary + line items
- *    → User can filter, search, and export CSV
- * 
- * STATE MANAGEMENT:
- * -----------------
- * - mode: Current view (upload | processing | dashboard)
- * - files: Array of File objects selected by user
- * - aggregatedData: Complete response from backend
- * - processingStatus: Status of each file (pending | complete | error)
- * - error: Error message if processing fails
- * 
- * BACKEND CONNECTION:
- * -------------------
- * API Endpoint: POST http://localhost:8000/ocr/invoice/extract-batch
- * Request: FormData with multiple files
- * Response: AggregatedData (see interface below)
  */
 
-import { useState } from "react";
-import "./App.css";
-import UploadArea from "./components/UploadArea";
-import ProcessingView from "./components/ProcessingView";
-import Dashboard from "./Dashboard";
-import ReviewInterface from "./components/ReviewInterface";
-import axios from "axios";
+import { useMemo, useState } from 'react'
+import axios from 'axios'
+
+import './App.css'
+
+import UploadArea from './components/UploadArea'
+import ProcessingView from './components/ProcessingView'
+import Dashboard from './Dashboard'
+import ReviewInterface from './components/ReviewInterface'
 
 // Define the different views of our application
-type AppMode = "upload" | "processing" | "dashboard" | "review";
+// Dashboard remains the default canvas; review uses an overlay instead of a separate mode.
+type AppMode = 'upload' | 'processing' | 'dashboard'
 
-/**
- * Structure of aggregated data from backend
- * Matches the response from /ocr/invoice/extract-batch endpoint
- */
+type FileProcessingStage = 'queued' | 'uploading' | 'processing' | 'complete' | 'error'
+
+interface FileProcessingState {
+  stage: FileProcessingStage
+  progress: number // 0 - 100
+  message?: string
+}
+
 interface AggregatedData {
   summary: {
-    total_amount: string;              // Formatted: "1,234.56"
-    total_invoices_processed: number;  // Count of successful invoices
-    vendors: string[];                 // Unique vendor list
-    processing_errors: string[];       // Error messages for failed files
-    // NEW: Trust & validation statistics
-    auto_approved_count?: number;      // Auto-approved invoices
-    needs_review_count?: number;       // Invoices needing review
-    math_errors_count?: number;        // Invoices with math errors
-    average_confidence?: number;       // Average confidence (0-1)
-  };
-  line_items: any[];  // All line items from all invoices (see MasterTable for structure)
-  invoices: any;      // Individual invoice summaries keyed by invoice ID
+    total_amount: string
+    total_invoices_processed: number
+    vendors: string[]
+    processing_errors: string[]
+    auto_approved_count?: number
+    needs_review_count?: number
+    math_errors_count?: number
+    average_confidence?: number
+  }
+  line_items: any[]
+  invoices: Record<string, any>
+  performance_metrics?: Record<string, any>
 }
 
 function App() {
-  // ========================================================================
-  // STATE MANAGEMENT
-  // ========================================================================
-  
-  // Current view mode (controls which component is rendered)
-  const [mode, setMode] = useState<AppMode>("upload");
-  
-  // Files selected by user (set by UploadArea component)
-  const [files, setFiles] = useState<File[]>([]);
-  
-  // Complete response from backend after processing
-  const [aggregatedData, setAggregatedData] = useState<AggregatedData | null>(
-    null
-  );
-  
-  // Processing status for each file (for ProcessingView)
-  const [processingStatus, setProcessingStatus] = useState<{
-    [key: string]: "pending" | "complete" | "error";
-  }>({});
-  
-  // Error message if backend call fails
-  const [error, setError] = useState<string | null>(null);
-  
-  // Review interface state
-  const [selectedInvoice, setSelectedInvoice] = useState<any>(null);
+  const [mode, setMode] = useState<AppMode>('upload')
+  const [files, setFiles] = useState<File[]>([])
+  const [aggregatedData, setAggregatedData] = useState<AggregatedData | null>(null)
+  const [processingStatus, setProcessingStatus] = useState<Record<string, FileProcessingState>>({})
+  const [error, setError] = useState<string | null>(null)
+  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null)
 
-  // ========================================================================
-  // EVENT HANDLERS
-  // ========================================================================
-  
-  /**
-   * Handle file selection from UploadArea component
-   * 
-   * DATA FLOW:
-   * ----------
-   * 1. User drops/selects files in UploadArea
-   * 2. UploadArea calls this handler with File[] array
-   * 3. Files stored in state
-   * 4. Reset any previous errors/data
-   * 
-   * CALLED BY: UploadArea component via onFileSelected prop
-   */
+  const isProcessing = mode === 'processing'
+
+  const selectedInvoice = useMemo(() => {
+    if (!aggregatedData || !selectedInvoiceId) return null
+    return aggregatedData.invoices?.[selectedInvoiceId] ?? null
+  }, [aggregatedData, selectedInvoiceId])
+
+  const selectedInvoiceLineItems = useMemo(() => {
+    if (!aggregatedData || !selectedInvoiceId) return []
+    return aggregatedData.line_items?.filter((item: any) => item.source_invoice_id === selectedInvoiceId) ?? []
+  }, [aggregatedData, selectedInvoiceId])
+
+  const selectedInvoicePdfUrl = useMemo(() => {
+    if (!selectedInvoice?.filename) return null
+    const encodedName = encodeURIComponent(selectedInvoice.filename)
+    return `http://localhost:8000/files/${encodedName}`
+  }, [selectedInvoice])
+
   const handleFilesSelected = (files: File[]) => {
-    setFiles(files);
-    setError(null);
-    setAggregatedData(null);
-  };
+    setFiles(files)
+    setError(null)
+    setAggregatedData(null)
+    setSelectedInvoiceId(null)
+    const initialStatus = files.reduce((acc, file) => {
+      acc[file.name] = { stage: 'queued', progress: 0 }
+      return acc
+    }, {} as Record<string, FileProcessingState>)
+    setProcessingStatus(initialStatus)
+  }
 
-  /**
-   * Process invoices by sending to backend
-   * 
-   * DATA FLOW:
-   * ----------
-   * 1. Validate files exist
-   * 2. Switch to processing view
-   * 3. Set all files to "pending" status
-   * 4. Create FormData with all files
-   * 5. POST to backend /ocr/invoice/extract-batch
-   * 6. On success:
-   *    - Mark all files as "complete"
-   *    - Store aggregated data
-   *    - Switch to dashboard view
-   * 7. On error:
-   *    - Show error message
-   *    - Return to upload view
-   * 
-   * BACKEND CONNECTION:
-   * -------------------
-   * Endpoint: POST /ocr/invoice/extract-batch
-   * Headers: Content-Type: multipart/form-data
-   * Body: FormData with 'files' key (multiple files)
-   * 
-   * NEXT: Backend processes → returns AggregatedData → displays in Dashboard
-   */
   const handleProcessInvoices = async () => {
-    console.log("handleProcessInvoices called!");
-    
-    // ═══════════════════════════════════════════════════════════
-    // PERFORMANCE TRACKING START
-    // ═══════════════════════════════════════════════════════════
-    const perfStart = performance.now();
-    const perfTimings: { [key: string]: number } = {};
-    
-    if(files.length === 0) {
-      setError("Please select at least one invoice file.");
-      return;
+    if (files.length === 0) {
+      setError('Please select at least one invoice file.')
+      return
     }
 
-    console.log(`\n${"═".repeat(60)}`);
-    console.log("🚀 LAYRA PERFORMANCE TRACKING");
-    console.log(`${"═".repeat(60)}`);
-    console.log(`Files to process: ${files.length}`);
-    console.log(`Total file size: ${(files.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)} MB\n`);
-    
-    // Stage 1: Frontend Preparation
-    const prepStart = performance.now();
-    setMode('processing');
-    setError(null);
-    setAggregatedData(null);
+    setMode('processing')
+    setError(null)
+    setAggregatedData(null)
+    setSelectedInvoiceId(null)
 
-    // Set initial processing status for all files 
-    const initialStatus = files.reduce((acc, file) => {
-      acc[file.name] = 'pending';
-      return acc;
-    }, {} as { [key: string]: "pending" | "complete" | "error" });
-    setProcessingStatus(initialStatus);
+    const formData = new FormData()
+    files.forEach((file) => {
+      formData.append('files', file)
+    })
 
-    const formData = new FormData();
-    files.forEach(file => {
-      formData.append('files', file);
-    });
-    
-    perfTimings['1_frontend_prep'] = performance.now() - prepStart;
-    console.log(`✓ Stage 1: Frontend Preparation - ${perfTimings['1_frontend_prep'].toFixed(2)}ms`);
+    const fileBoundaries = files.reduce((acc, file) => {
+      const previousEnd = acc.length > 0 ? acc[acc.length - 1].end : 0
+      acc.push({ name: file.name, start: previousEnd, end: previousEnd + file.size })
+      return acc
+    }, [] as Array<{ name: string; start: number; end: number }>)
+
+    setProcessingStatus(
+      files.reduce((acc, file) => {
+        acc[file.name] = { stage: 'uploading', progress: 0 }
+        return acc
+      }, {} as Record<string, FileProcessingState>),
+    )
 
     try {
-      // Stage 2: Network Upload
-      const uploadStart = performance.now();
-      console.log(`\n⬆️  Stage 2: Uploading to backend...`);
-      
       const response = await axios.post('http://localhost:8000/ocr/invoice/extract-batch', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
-        timeout: 300000, // 5 minute timeout for large files
-      });
-      
-      perfTimings['2_network_upload'] = performance.now() - uploadStart;
-      
-      // Stage 3: Backend Processing (measured on backend, extracted from response)
-      const backendData = response.data;
-      if (backendData.performance_metrics) {
-        perfTimings['3_backend_total'] = backendData.performance_metrics.total_time;
-        perfTimings['3a_file_save'] = backendData.performance_metrics.file_save_time;
-        perfTimings['3b_ocr_extraction'] = backendData.performance_metrics.ocr_time;
-        perfTimings['3c_validation'] = backendData.performance_metrics.validation_time;
-        perfTimings['3d_aggregation'] = backendData.performance_metrics.aggregation_time;
-      }
-      
-      console.log(`✓ Stage 2: Network Upload - ${perfTimings['2_network_upload'].toFixed(2)}ms`);
-      console.log(`✓ Stage 3: Backend Processing - ${perfTimings['3_backend_total']?.toFixed(2) || 'N/A'}ms`);
-      
-      // Stage 4: Frontend Rendering
-      const renderStart = performance.now();
-      
-      // Mark all files as complete when response arrives
-      const completedStatus = files.reduce((acc, file) => {
-        acc[file.name] = 'complete';
-        return acc;
-      }, {} as { [key: string]: "pending" | "complete" | "error" });
-      setProcessingStatus(completedStatus);
-      
-      setAggregatedData(response.data);
-      
-      perfTimings['4_frontend_render'] = performance.now() - renderStart;
-      perfTimings['total_time'] = performance.now() - perfStart;
-      
-      // ═══════════════════════════════════════════════════════════
-      // PERFORMANCE SUMMARY
-      // ═══════════════════════════════════════════════════════════
-      console.log(`\n${"═".repeat(60)}`);
-      console.log("📊 LAYRA PERFORMANCE BREAKDOWN");
-      console.log(`${"═".repeat(60)}\n`);
-      
-      const totalTime = perfTimings['total_time'];
-      const backendTime = perfTimings['3_backend_total'] || 0;
-      
-      console.log("FRONTEND STAGES:");
-      console.log(`  1. Preparation:     ${perfTimings['1_frontend_prep'].toFixed(2)}ms (${(perfTimings['1_frontend_prep'] / totalTime * 100).toFixed(1)}%)`);
-      console.log(`  2. Network Upload:  ${perfTimings['2_network_upload'].toFixed(2)}ms (${(perfTimings['2_network_upload'] / totalTime * 100).toFixed(1)}%)`);
-      console.log(`  4. Rendering:       ${perfTimings['4_frontend_render'].toFixed(2)}ms (${(perfTimings['4_frontend_render'] / totalTime * 100).toFixed(1)}%)`);
-      
-      if (backendData.performance_metrics) {
-        console.log(`\nBACKEND STAGES (from server):`);
-        console.log(`  3a. File Save:      ${backendData.performance_metrics.file_save_time.toFixed(2)}ms (${(backendData.performance_metrics.file_save_time / totalTime * 100).toFixed(1)}%)`);
-        console.log(`  3b. OCR Extraction: ${backendData.performance_metrics.ocr_time.toFixed(2)}ms (${(backendData.performance_metrics.ocr_time / totalTime * 100).toFixed(1)}%) ⚠️ BOTTLENECK`);
-        console.log(`  3c. Validation:     ${backendData.performance_metrics.validation_time.toFixed(2)}ms (${(backendData.performance_metrics.validation_time / totalTime * 100).toFixed(1)}%)`);
-        console.log(`  3d. Aggregation:    ${backendData.performance_metrics.aggregation_time.toFixed(2)}ms (${(backendData.performance_metrics.aggregation_time / totalTime * 100).toFixed(1)}%)`);
-        
-        if (backendData.performance_metrics.deepseek_breakdown) {
-          console.log(`\n  OCR BREAKDOWN:`);
-          console.log(`    - PDF Text Extract: ${backendData.performance_metrics.deepseek_breakdown.text_extraction_time.toFixed(2)}ms`);
-          console.log(`    - DeepSeek API Call: ${backendData.performance_metrics.deepseek_breakdown.api_call_time.toFixed(2)}ms ⚠️`);
-          console.log(`    - JSON Parsing:     ${backendData.performance_metrics.deepseek_breakdown.json_parse_time.toFixed(2)}ms`);
-        }
-      }
-      
-      console.log(`\n${"─".repeat(60)}`);
-      console.log(`TOTAL TIME: ${totalTime.toFixed(2)}ms (${(totalTime / 1000).toFixed(2)}s)`);
-      console.log(`Per Invoice: ${(totalTime / files.length).toFixed(2)}ms`);
-      console.log(`${"═".repeat(60)}\n`);
-      
-      // Small delay to show completion before transitioning to dashboard
+        timeout: 300_000,
+        onUploadProgress: (progressEvent) => {
+          const loaded = progressEvent.loaded || 0
+          setProcessingStatus((previous) => {
+            const updated = { ...previous }
+            fileBoundaries.forEach(({ name, start, end }) => {
+              const fileSpan = Math.max(end - start, 1)
+              const loadedForFile = Math.min(Math.max(loaded - start, 0), fileSpan)
+              const ratio = loadedForFile / fileSpan
+              const existing = updated[name] ?? { stage: 'queued', progress: 0 }
+              let stage: FileProcessingStage = ratio >= 1 ? 'processing' : 'uploading'
+              let computedProgress =
+                ratio >= 1 ? Math.max(existing.progress, 90) : Math.max(existing.progress, Math.floor(ratio * 80))
+              if (existing.stage === 'complete') {
+                stage = existing.stage
+                computedProgress = existing.progress
+              }
+              updated[name] = {
+                ...existing,
+                stage,
+                progress: Math.min(Math.max(0, computedProgress), 99),
+              }
+            })
+            return updated
+          })
+        },
+      })
+
+      setProcessingStatus((previous) => {
+        const updated = { ...previous }
+        files.forEach((file) => {
+          const existing = updated[file.name] ?? { stage: 'processing', progress: 95 }
+          updated[file.name] = {
+            ...existing,
+            stage: 'complete',
+            progress: 100,
+          }
+        })
+        return updated
+      })
+
+      setAggregatedData(response.data)
+
       setTimeout(() => {
-        setMode('dashboard');
-      }, 800);
-
+        setMode('dashboard')
+      }, 600)
     } catch (err: any) {
-      console.error("Error details:", err);
-      console.error("Error response:", err.response);
-      
-      let errorMessage = 'An unknown error occurred during processing.';
-      
+      let errorMessage = 'An unknown error occurred during processing.'
+
       if (err.response) {
-        // Server responded with error
-        errorMessage = err.response.data?.detail || err.response.data?.error || `Server error: ${err.response.status}`;
+        errorMessage = err.response.data?.detail || err.response.data?.error || `Server error: ${err.response.status}`
       } else if (err.request) {
-        // Request made but no response
-        errorMessage = 'No response from server. Is the backend running on http://localhost:8000?';
+        errorMessage = 'No response from server. Is the backend running on http://localhost:8000?'
       } else {
-        // Something else happened
-        errorMessage = err.message || errorMessage;
+        errorMessage = err.message || errorMessage
       }
-      
-      setError(errorMessage);
-      setMode('upload'); // Go back to upload on error
-      
-      // Reset processing status
-      setProcessingStatus({});
+
+      setError(errorMessage)
+      setMode('upload')
+      setSelectedInvoiceId(null)
+
+      setProcessingStatus((previous) => {
+        const updated = { ...previous }
+        files.forEach((file) => {
+          const existing = updated[file.name] ?? { stage: 'processing', progress: 90 }
+          updated[file.name] = {
+            ...existing,
+            stage: 'error',
+            progress: 100,
+            message: errorMessage,
+          }
+        })
+        return updated
+      })
     }
-  };
-  
-  /**
-   * Handle invoice review navigation
-   * 
-   * DATA FLOW:
-   * ----------
-   * 1. User clicks "Review Invoice" on Dashboard
-   * 2. Sets selected invoice data and switches to review mode
-   * 3. ReviewInterface displays PDF + extracted data side-by-side
-   */
-  const handleReviewInvoice = (_invoiceId: string, invoiceData: any) => {
-    console.log("Reviewing invoice:", _invoiceId, invoiceData);
-    setSelectedInvoice(invoiceData);
-    setMode("review");
-  };
-  
-  /**
-   * Handle back to dashboard from review
-   */
-  const handleBackToDashboard = () => {
-    setMode("dashboard");
-    setSelectedInvoice(null);
-  };
+  }
 
-  // ========================================================================
-  // RENDER
-  // ========================================================================
+  const handleReviewInvoice = (invoiceId: string) => {
+    setSelectedInvoiceId(invoiceId)
+  }
+
+  const handleCloseReview = () => {
+    setSelectedInvoiceId(null)
+  }
+
+  const handleInvoiceChange = (invoiceId: string, updatedInvoice: any, updatedLineItems: any[]) => {
+    setAggregatedData((previous) => {
+      if (!previous) return previous
+
+      const invoices = {
+        ...previous.invoices,
+        [invoiceId]: {
+          ...(previous.invoices?.[invoiceId] ?? {}),
+          ...updatedInvoice,
+        },
+      }
+
+      const otherLineItems = previous.line_items.filter((item: any) => item.source_invoice_id !== invoiceId)
+      const lineItems = [...otherLineItems, ...updatedLineItems]
+
+      const parseNumber = (value: unknown): number => {
+        if (typeof value === 'number' && Number.isFinite(value)) return value
+        if (value === null || value === undefined) return 0
+        const parsed = Number(String(value).replace(/[^0-9.-]/g, ''))
+        return Number.isFinite(parsed) ? parsed : 0
+      }
+
+      const formatCurrency = (value: number) =>
+        new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(value)
+
+      const vendors = Array.from(new Set(Object.values(invoices).map((invoice: any) => invoice.vendor).filter(Boolean)))
+      const totalAmountNumeric = Object.values(invoices).reduce((sum, invoice: any) => sum + parseNumber(invoice.total_amount), 0)
+      const autoApprovedCount = Object.values(invoices).filter((invoice: any) =>
+        invoice.review_status === 'AUTO_APPROVED' || invoice.review_status === 'APPROVED_WITH_VERIFICATION'
+      ).length
+      const needsReviewCount = Object.values(invoices).length - autoApprovedCount
+      const mathErrorsCount = Object.values(invoices).filter((invoice: any) => invoice.math_validation?.overall_valid === false).length
+      const confidenceValues = Object.values(invoices)
+        .map((invoice: any) => parseNumber(invoice.confidence?.overall))
+        .filter((value) => value > 0)
+      const averageConfidence = confidenceValues.length
+        ? Number((confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length).toFixed(2))
+        : previous.summary.average_confidence ?? 0
+
+      const summary = {
+        ...previous.summary,
+        vendors,
+        total_amount: formatCurrency(totalAmountNumeric).replace('$', ''),
+        auto_approved_count: autoApprovedCount,
+        needs_review_count: needsReviewCount,
+        math_errors_count: mathErrorsCount,
+        average_confidence: averageConfidence,
+      }
+
+      return {
+        ...previous,
+        invoices,
+        line_items: lineItems,
+        summary,
+      }
+    })
+  }
+
   return (
-    <>
-      <div className="container">
-        <h1>Aggregate Invoice Processor</h1>
-        <p>Upload your invoices to get started.</p>
+    <div className="min-h-screen bg-slate-900 text-slate-100">
+      <main className="mx-auto flex w-full max-w-7xl flex-col gap-8 px-4 py-10 lg:px-6">
+        <header className="space-y-2">
+          <p className="text-xs uppercase tracking-[0.6rem] text-slate-400">Layra</p>
+          <h1 className="text-3xl font-semibold tracking-tight text-white">Invoice intelligence workspace</h1>
+          <p className="max-w-2xl text-sm text-slate-300">
+            Upload invoices, monitor processing, and review extracted data with confidence.
+          </p>
+        </header>
 
-        {/* 
-          CONDITIONAL RENDERING based on mode state
-          ===========================================
-          Three views, only one shown at a time based on processing stage
-        */}
-        
-        {/* 
-          VIEW 1: UPLOAD MODE
-          -------------------
-          Shows drag-and-drop area for file selection
-          User can select multiple invoice PDFs
-          "Process Invoices" button triggers handleProcessInvoices()
-        */}
-        {mode === "upload" && (
+        {mode === 'upload' && (
           <UploadArea
-            onFileSelected={handleFilesSelected}  // Callback: stores files in state
-            onProcess={handleProcessInvoices}      // Callback: starts backend processing
-            disabled={mode !== "upload"}            // Disable during other modes
-            files={files}                           // Current files for display
+            onFileSelected={handleFilesSelected}
+            onProcess={handleProcessInvoices}
+            disabled={isProcessing}
+            files={files}
           />
         )}
 
-        {/* 
-          VIEW 2: PROCESSING MODE
-          -----------------------
-          Shows progress bar and file status list
-          Backend is processing files concurrently
-          Animated progress bar provides visual feedback
-        */}
-        {mode === "processing" && (
-         <ProcessingView
-          files={files}                         // Files being processed
-          processingStatus={processingStatus}   // Status of each file (pending/complete/error)
-         />
+        {mode === 'processing' && (
+          <ProcessingView files={files} processingStatus={processingStatus} />
         )}
 
-        {/* 
-          VIEW 3: DASHBOARD MODE
-          ----------------------
-          Shows aggregated results from all invoices:
-          - Summary cards (total $, invoice count, vendors)
-          - Searchable & filterable line items table
-          - CSV export functionality
-          - Invoice cards with "Review Invoice" buttons
-        */}
-        {mode === "dashboard" && aggregatedData && (
-          <Dashboard 
-            aggregatedData={aggregatedData} 
-            onReviewInvoice={handleReviewInvoice}
-          />
+        {mode === 'dashboard' && aggregatedData && (
+          <Dashboard aggregatedData={aggregatedData} onReviewInvoice={(id) => handleReviewInvoice(id)} />
         )}
-        
-        {/* 
-          VIEW 4: REVIEW MODE
-          -------------------
-          Side-by-side PDF viewer and extracted data:
-          - Left: PDF viewer (original document)
-          - Right: Extracted data with confidence indicators
-          - Edit fields, approve/reject invoice
-        */}
-        {mode === "review" && selectedInvoice && (
-          <ReviewInterface
-            invoiceData={selectedInvoice}
-            pdfUrl={`http://localhost:8000/files/${selectedInvoice.filename}`}
-            onBack={handleBackToDashboard}
-          />
+
+        {error && (
+          <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+            {error}
+          </div>
         )}
-        
-        {/* Error Display (shown in any mode if error exists) */}
-        {error && <div className="error-message">{error}</div>}
-      </div>
-    </>
-  );
+      </main>
+
+      {selectedInvoice && selectedInvoicePdfUrl && (
+        <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-slate-950/80 backdrop-blur">
+          <div className="relative h-full w-full max-w-7xl overflow-y-auto px-4 py-8 lg:px-6">
+            <ReviewInterface
+              invoiceData={selectedInvoice}
+              lineItems={selectedInvoiceLineItems}
+              pdfUrl={selectedInvoicePdfUrl}
+              onBack={handleCloseReview}
+              onInvoiceChange={handleInvoiceChange}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
-export default App;
+export default App

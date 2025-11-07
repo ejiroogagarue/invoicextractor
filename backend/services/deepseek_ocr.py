@@ -29,13 +29,15 @@ DEEPSEEK SETUP:
 """
 
 import os
-import base64
+import asyncio
 import time
 import re
 from typing import Dict
 from dotenv import load_dotenv
 import requests
 import json
+
+from .document_text import extract_text_from_document
 
 load_dotenv()
 
@@ -98,65 +100,24 @@ def run_deepseek_ocr(file_bytes: bytes, mime_type: str = "application/pdf") -> d
     3. DeepSeek identifies invoice fields and formats as markdown table
     """
     start = time.time()
-    perf_metrics = {}
+    perf_metrics: Dict[str, float] = {}
     
     print(f"DEBUG: DeepSeek OCR starting...")
     print(f"DEBUG: File size: {len(file_bytes)} bytes, type: {mime_type}")
     
-    # Step 1: Extract raw text from the document
-    text_extract_start = time.time()
-    raw_text = ""
-    page_count = 1  # Default to 1 page for images
-    
     try:
-        if mime_type == "application/pdf":
-            # Use PyMuPDF to extract text from PDF
-            print("DEBUG: Extracting text from PDF using PyMuPDF...")
-            try:
-                import fitz  # PyMuPDF
-                
-                # Open PDF from bytes
-                pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
-                page_count = len(pdf_document)
-                
-                # Extract text from all pages
-                for page_num in range(page_count):
-                    page = pdf_document[page_num]
-                    raw_text += f"\n\n=== Page {page_num + 1} ===\n\n"
-                    raw_text += page.get_text()
-                
-                pdf_document.close()
-                perf_metrics['text_extraction_time'] = (time.time() - text_extract_start) * 1000
-                print(f"DEBUG: Extracted {len(raw_text)} characters from {page_count} page(s) ({perf_metrics['text_extraction_time']:.2f}ms)")
-                
-            except ImportError:
-                print("WARNING: PyMuPDF (fitz) not installed. Install with: pip install PyMuPDF")
-                raise RuntimeError("PyMuPDF required for PDF processing. Install with: pip install PyMuPDF")
-                
-        elif mime_type.startswith("image/"):
-            # Use pytesseract for image OCR
-            print("DEBUG: Performing OCR on image using pytesseract...")
-            try:
-                from PIL import Image
-                import pytesseract
-                import io
-                
-                # Open image from bytes
-                image = Image.open(io.BytesIO(file_bytes))
-                raw_text = pytesseract.image_to_string(image)
-                perf_metrics['text_extraction_time'] = (time.time() - text_extract_start) * 1000
-                print(f"DEBUG: Extracted {len(raw_text)} characters from image ({perf_metrics['text_extraction_time']:.2f}ms)")
-                page_count = 1  # Images are single page
-                
-            except ImportError:
-                print("WARNING: PIL or pytesseract not installed.")
-                raise RuntimeError("PIL and pytesseract required for image processing. Install with: pip install Pillow pytesseract")
-        else:
-            raise ValueError(f"Unsupported mime type: {mime_type}")
-    
-    except Exception as e:
-        print(f"ERROR: Text extraction failed: {e}")
-        raise RuntimeError(f"Failed to extract text from document: {str(e)}")
+        text_result = extract_text_from_document(file_bytes, mime_type)
+    except Exception as exc:
+        print(f"ERROR: Text extraction failed: {exc}")
+        raise RuntimeError(f"Failed to extract text from document: {str(exc)}")
+
+    raw_text = text_result.text
+    page_count = text_result.page_count
+    perf_metrics.update(text_result.perf_metrics)
+    print(
+        f"DEBUG: Extracted {len(raw_text)} characters from {page_count} page(s) "
+        f"({perf_metrics.get('text_extraction_time', 0):.2f}ms)"
+    )
     
     if not raw_text.strip():
         print("WARNING: No text extracted from document")
@@ -304,6 +265,7 @@ OTHER IMPORTANT FIELDS:
         
         # Extract the JSON text from the response
         json_parse_start = time.time()
+        response_text = ""
         if "choices" in result and len(result["choices"]) > 0:
             response_text = result["choices"][0]["message"]["content"]
             print(f"DEBUG: Extracted {len(response_text)} characters of text")
@@ -341,6 +303,7 @@ OTHER IMPORTANT FIELDS:
                 "error": "No content in DeepSeek response",
                 "line_items": []
             }
+            response_text = json.dumps(invoice_json)
         
         # Calculate duration
         duration = round(time.time() - start, 2)
@@ -352,6 +315,18 @@ OTHER IMPORTANT FIELDS:
         print(f"  - API Call:        {perf_metrics.get('api_call_time', 0):.2f}ms")
         print(f"  - JSON Parsing:    {perf_metrics.get('json_parse_time', 0):.2f}ms")
         
+        performance = {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "provider_model": "deepseek-chat",
+            "provider_breakdown": {
+                "text_extraction_time": perf_metrics.get("text_extraction_time", 0),
+                "api_call_time": perf_metrics.get("api_call_time", 0),
+                "json_parse_time": perf_metrics.get("json_parse_time", 0),
+            },
+            **perf_metrics,
+        }
+
         # Return both JSON and markdown (for backward compatibility)
         # The markdown is now just a stringified version of the JSON for debugging
         return {
@@ -360,7 +335,7 @@ OTHER IMPORTANT FIELDS:
             "pages": page_count,
             "duration": duration,
             "images": {},  # Not extracting page images with DeepSeek
-            "performance": perf_metrics  # NEW: Performance breakdown
+            "performance": performance  # NEW: Performance breakdown
         }
     
     except requests.exceptions.Timeout:
@@ -434,3 +409,24 @@ def run_deepseek_ocr_with_pdf_conversion(file_bytes: bytes, mime_type: str = "ap
         print(f"WARNING: PDF conversion failed: {e}. Falling back to direct processing.")
         return run_deepseek_ocr(file_bytes, mime_type)
 
+
+class DeepseekInvoiceExtractor:
+    """Adapter that exposes DeepSeek OCR via the common extractor interface."""
+
+    name = "deepseek"
+
+    async def extract_invoice(
+        self,
+        *,
+        file_bytes: bytes,
+        filename: str,
+        mime_type: str,
+    ) -> dict:
+        def _blocking_call() -> dict:
+            return run_deepseek_ocr(file_bytes, mime_type)
+
+        result = await asyncio.to_thread(_blocking_call)
+        performance = result.get("performance") or {}
+        performance.setdefault("provider", self.name)
+        result["performance"] = performance
+        return result

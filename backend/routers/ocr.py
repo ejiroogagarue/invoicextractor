@@ -6,9 +6,8 @@ DATA FLOW OVERVIEW (JSON-BASED EXTRACTION):
 ===========================================
 1. Frontend uploads files → /invoice/extract-batch endpoint
 2. Files sent to _process_single_invoice() for concurrent processing
-3. Each invoice goes through:
-   - run_deepseek_ocr() → Extracts text from PDF/image, sends to DeepSeek API
-   - DeepSeek returns structured JSON (no regex parsing needed!)
+3. Each invoice goes through the configured OCR provider (Gemini or DeepSeek):
+   - Provider extracts and structures invoice data (JSON schema)
    - JSON parsed directly → All fields extracted (shipping, discount, etc.)
    - calculate_extraction_confidence() → Field presence/quality scoring
    - validate_invoice_math() → Mathematical validation
@@ -26,7 +25,7 @@ TRUST-FIRST DESIGN:
 
 CONNECTIONS:
 ============
-→ services/deepseek_ocr.py: run_deepseek_ocr() - JSON-based OCR processing
+→ services/invoice_extractor.py: Provider factory & settings
 → services/validation.py: Mathematical validation and trust scoring
 → Frontend: App.tsx → handleProcessInvoices() receives response
 """
@@ -34,9 +33,12 @@ CONNECTIONS:
 from typing import List, Any, Dict
 from fastapi import APIRouter, File, UploadFile, HTTPException, Header
 from fastapi.responses import JSONResponse
-# OCR Service - Switch between Mistral and DeepSeek
-# from services.mistral_ocr import run_mistral_ocr
-from services.deepseek_ocr import run_deepseek_ocr as run_ocr  # Using DeepSeek
+# OCR Provider abstraction
+from services.invoice_extractor import (
+    get_invoice_extractor,
+    get_ocr_settings,
+    InvoiceExtractorProtocol,
+)
 from services.structure import parse_sections
 from services.entities import extract_entities
 from services.validation import (
@@ -49,6 +51,16 @@ import time
 import asyncio
 import uuid
 import re
+
+
+_ocr_settings = get_ocr_settings()
+_invoice_extractor: InvoiceExtractorProtocol = get_invoice_extractor(_ocr_settings)
+
+print(
+    f"OCR provider initialised -> provider: {_invoice_extractor.name}, "
+    f"model: {getattr(_invoice_extractor, '_model', 'n/a')}, "
+    f"max concurrency: {_ocr_settings.max_concurrency}"
+)
 
 
 router = APIRouter()
@@ -314,14 +326,17 @@ def _parse_invoice_table(markdown: str):
 # ========================================================================
 # HELPER FUNCTION: Process Individual Invoice
 # ========================================================================
-async def _process_single_invoice(file: UploadFile) -> Dict[str, Any]:
+async def _process_single_invoice(
+    file: UploadFile,
+    extractor: InvoiceExtractorProtocol,
+) -> Dict[str, Any]:
     """
     Processes a single invoice file and returns the extracted data.
     
     DATA FLOW (JSON-BASED):
     ------------------------
     1. Receives: UploadFile from extract_invoice_data_batch()
-    2. Calls: run_deepseek_ocr() → Get structured JSON (no regex needed!)
+    2. Invokes configured OCR provider → Get structured JSON (no regex needed!)
     3. Extracts: All fields directly from JSON (invoice_number, date, vendor, etc.)
     4. Normalizes: Line items to our internal format
     5. Calculates: Extraction confidence based on field presence/quality
@@ -357,6 +372,7 @@ async def _process_single_invoice(file: UploadFile) -> Dict[str, Any]:
     """
     try:
         import time as time_module
+        invoice_uid = str(uuid.uuid4())
         invoice_perf = {}
         invoice_start = time_module.time()
         
@@ -376,12 +392,25 @@ async def _process_single_invoice(file: UploadFile) -> Dict[str, Any]:
         invoice_perf['file_save_time'] = (time_module.time() - file_save_start) * 1000
         print(f"DEBUG: Saved file to {file_path} ({invoice_perf['file_save_time']:.2f}ms)")
         
-        print(f"DEBUG: Calling DeepSeek OCR for {file.filename}...")
+        provider_name = getattr(extractor, "name", "unknown")
+        print(f"DEBUG: Calling {provider_name} OCR for {file.filename}...")
         ocr_start = time_module.time()
-        ocr_result = run_ocr(contents, mime_type)
+        ocr_result = await extractor.extract_invoice(
+            file_bytes=contents,
+            filename=file.filename,
+            mime_type=mime_type,
+        )
         invoice_perf['ocr_time'] = (time_module.time() - ocr_start) * 1000
-        invoice_perf['deepseek_breakdown'] = ocr_result.get('performance', {})
-        print(f"DEBUG: OCR complete for {file.filename} ({invoice_perf['ocr_time']:.2f}ms)")
+        invoice_perf['provider'] = provider_name
+        model_name = getattr(extractor, "_model", None)
+        if model_name:
+            invoice_perf['model'] = model_name
+        provider_metrics = ocr_result.get('performance', {}) or {}
+        invoice_perf['provider_breakdown'] = provider_metrics.get('provider_breakdown', provider_metrics)
+        print(
+            f"DEBUG: OCR complete for {file.filename} "
+            f"({invoice_perf['ocr_time']:.2f}ms via {provider_name})"
+        )
         
         # Extract JSON data (NEW: Trust-first JSON extraction)
         invoice_json = ocr_result.get("result_json", {})
@@ -456,6 +485,7 @@ async def _process_single_invoice(file: UploadFile) -> Dict[str, Any]:
         
         # Build invoice data
         invoice_data = {
+            "invoice_uid": invoice_uid,
             "filename": file.filename,
             "invoice_number": inv_number,
             "vendor_name": vendor_name,
@@ -536,6 +566,7 @@ async def _process_single_invoice(file: UploadFile) -> Dict[str, Any]:
             "review_status": review_decision['status'],
             "review_reason": review_decision['reason'],
             "auto_approve": review_decision['auto_approve'],
+            "provider": provider_name,
             "performance": invoice_perf  # NEW: Performance metrics
         })
         
@@ -559,7 +590,7 @@ async def analyze_pdf(file: UploadFile = File(...)):
     DATA FLOW:
     ----------
     1. Frontend uploads single file
-    2. File → run_mistral_ocr() → Get markdown + images
+    2. File → configured OCR provider → Get structured payload
     3. Markdown → parse_sections() → Document structure
     4. Markdown → extract_entities() → Dates, amounts, emails, etc.
     5. Return combined results to frontend
@@ -586,8 +617,12 @@ async def analyze_pdf(file: UploadFile = File(...)):
         
         #Run OCR 
         print("DEBUG: Running OCR...")
-        # Run OCR
-        ocr_result = run_ocr(contents, mime_type)
+        # Run OCR via configured provider
+        ocr_result = await _invoice_extractor.extract_invoice(
+            file_bytes=contents,
+            filename=file.filename,
+            mime_type=mime_type,
+        )
       
         
         #Extract the actual markdown text from the result dictionary
@@ -608,8 +643,8 @@ async def analyze_pdf(file: UploadFile = File(...)):
         
         return JSONResponse(content={
             "result_markdown": markdown_text, # Use the extracted text here
-            "pages": ocr_result["pages"], # Use the values from the OCR result
-            "duration": ocr_result["duration"],
+            "pages": ocr_result.get("pages", 0), # Use the values from the OCR result
+            "duration": ocr_result.get("duration"),
             "sections": sections, #Use the newly parsed sections
             "entities": entities , # Use the newly extracted entities
             "images": images,  # Always return a dict, even if empty
@@ -692,7 +727,10 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
     print(f"\n{'═' * 60}")
     print(f"🚀 BACKEND PERFORMANCE TRACKING")
     print(f"{'═' * 60}")
-    print(f"Received {len(files) if files else 0} files")
+    print(
+        f"Received {len(files) if files else 0} files | "
+        f"Provider: {_invoice_extractor.name} | Concurrency: {_ocr_settings.max_concurrency}"
+    )
     for i, file in enumerate(files):
         print(f"  File {i+1}: {file.filename}, size: {file.size if hasattr(file, 'size') else 'unknown'}")
     
@@ -706,9 +744,14 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
     print(f"\n⚙️  Starting concurrent processing of {len(files)} files...")
     ocr_start = time_module.time()
     
-    # Use asyncio to process files concurrently for better performance
-    tasks = [_process_single_invoice(file) for file in files]
-    
+    semaphore = asyncio.Semaphore(max(1, _ocr_settings.max_concurrency))
+
+    async def _guarded_process(upload_file: UploadFile):
+        async with semaphore:
+            return await _process_single_invoice(upload_file, _invoice_extractor)
+
+    tasks = [_guarded_process(file) for file in files]
+
     # Wait for all files to be processed 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
@@ -744,7 +787,7 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
             continue
         
         # --- Aggregate data from successful processing --- 
-        invoice_id = f"inv-{result.get('invoice_number', 'unknown')}"
+        invoice_id = result.get("invoice_uid") or f"inv-{uuid.uuid4()}"
         aggregated_data["summary"]["total_invoices_processed"] += 1
         
         total_amount = result.get("total_amount", 0)
@@ -791,6 +834,7 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
             
         #Store individual invoice details with validation data
         aggregated_data["invoices"][invoice_id] = {
+            "invoice_uid": invoice_id,
             "filename": result.get("filename"),  # CRITICAL: Needed for PDF viewer
             "invoice_number": result.get("invoice_number"),  # For display
             "vendor": result.get("vendor_name"),
@@ -834,16 +878,17 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
     # Extract detailed timing from individual invoice results
     file_save_times = []
     validation_times = []
-    deepseek_times = []
+    provider_breakdowns = []
     
     for result in results:
         if isinstance(result, Exception):
             continue
         if result.get('performance'):
-            file_save_times.append(result['performance'].get('file_save_time', 0))
-            validation_times.append(result['performance'].get('validation_time', 0))
-            if result['performance'].get('deepseek_breakdown'):
-                deepseek_times.append(result['performance']['deepseek_breakdown'])
+            performance = result['performance']
+            file_save_times.append(performance.get('file_save_time', 0))
+            validation_times.append(performance.get('validation_time', 0))
+            if performance.get('provider_breakdown'):
+                provider_breakdowns.append(performance['provider_breakdown'])
     
     # Calculate averages and totals
     avg_file_save = sum(file_save_times) / len(file_save_times) if file_save_times else 0
@@ -851,14 +896,20 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
     total_file_save = sum(file_save_times)
     total_validation = sum(validation_times)
     
-    # DeepSeek breakdown
-    deepseek_breakdown = {}
-    if deepseek_times:
-        deepseek_breakdown = {
-            'text_extraction_time': sum(d.get('text_extraction_time', 0) for d in deepseek_times) / len(deepseek_times),
-            'api_call_time': sum(d.get('api_call_time', 0) for d in deepseek_times) / len(deepseek_times),
-            'json_parse_time': sum(d.get('json_parse_time', 0) for d in deepseek_times) / len(deepseek_times)
-        }
+    # Provider breakdown
+    provider_breakdown = {}
+    if provider_breakdowns:
+        numeric_keys = {"text_extraction_time", "api_call_time", "json_parse_time"}
+        for key in numeric_keys:
+            values = [d.get(key) for d in provider_breakdowns if isinstance(d.get(key), (int, float))]
+            if values:
+                provider_breakdown[key] = sum(values) / len(values)
+
+        sample_breakdown = provider_breakdowns[0]
+        if isinstance(sample_breakdown, dict):
+            for meta_key in ("provider", "model"):
+                if sample_breakdown.get(meta_key):
+                    provider_breakdown[meta_key] = sample_breakdown[meta_key]
     
     # Add performance metrics to response
     aggregated_data['performance_metrics'] = {
@@ -867,7 +918,7 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
         'ocr_time': perf_timings['ocr_time'],
         'validation_time': total_validation,
         'aggregation_time': perf_timings['aggregation_time'],
-        'deepseek_breakdown': deepseek_breakdown,
+        'provider_breakdown': provider_breakdown,
         'per_invoice_avg': perf_timings['total_time'] / len(files) if files else 0,
         'files_processed': len(files),
         'successful': len([r for r in results if not isinstance(r, Exception)]),
@@ -885,11 +936,12 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
     print(f"  OCR Extract:  {perf_timings['ocr_time']:.2f}ms ({perf_timings['ocr_time']/perf_timings['total_time']*100:.1f}%) ⚠️ BOTTLENECK")
     print(f"  Validation:   {total_validation:.2f}ms ({total_validation/perf_timings['total_time']*100:.1f}%)")
     print(f"  Aggregation:  {perf_timings['aggregation_time']:.2f}ms ({perf_timings['aggregation_time']/perf_timings['total_time']*100:.1f}%)")
-    if deepseek_breakdown:
-        print(f"\nDEEPSEEK BREAKDOWN (avg per invoice):")
-        print(f"  Text Extract: {deepseek_breakdown['text_extraction_time']:.2f}ms")
-        print(f"  API Call:     {deepseek_breakdown['api_call_time']:.2f}ms ⚠️")
-        print(f"  JSON Parse:   {deepseek_breakdown['json_parse_time']:.2f}ms")
+    if provider_breakdown:
+        print(f"\nOCR BREAKDOWN (avg per invoice):")
+        for key, value in provider_breakdown.items():
+            if isinstance(value, (int, float)):
+                label = key.replace('_', ' ').title()
+                print(f"  {label}: {value:.2f}ms")
     print(f"{'═' * 60}\n")
     
     return JSONResponse(content=aggregated_data)
