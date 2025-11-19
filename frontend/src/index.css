@@ -21,3 +21,216 @@ a {
 a:hover {
   @apply underline;
 }
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.15s ease-out;
+}
+
+/* Upload Page Styles - Matching Webflow Design */
+.upload-page {
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+.neoboxout {
+  /* Enhanced neumorphic effect with 3D depth */
+  box-shadow: 
+    0 10px 25px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 0 0 1px rgba(0, 0, 0, 0.05);
+  background: linear-gradient(135deg, #ffc300 0%, #ffc300 100%);
+  transform-style: preserve-3d;
+  perspective: 1000px;
+}
+
+/* Subtle 3D hover effect */
+.neoboxout-hover:hover {
+  transform: translateY(-3px) scale(1.005);
+  box-shadow: 
+    0 14px 30px rgba(0, 0, 0, 0.25),
+    inset 0 1px 2px rgba(255, 255, 255, 0.15),
+    0 0 0 1px rgba(0, 0, 0, 0.08);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Active/drag state - subtle lift */
+.neoboxout-active {
+  transform: translateY(-2px) scale(1.002);
+  box-shadow: 
+    0 12px 28px rgba(0, 0, 0, 0.24),
+    inset 0 1px 2px rgba(255, 255, 255, 0.12),
+    0 0 0 4px rgba(0, 0, 0, 0.2);
+}
+
+.neoboxout:active {
+  transform: translateY(-1px) scale(0.998);
+  box-shadow: 
+    0 8px 20px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 0 0 1px rgba(0, 0, 0, 0.05);
+  transition: all 0.15s ease-out;
+}
+
+.pagetitle {
+  font-family: 'Inter', sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.pagesubtitle {
+  font-family: 'Inter', sans-serif;
+  font-weight: 400;
+}
+
+/* Desktop and Tablet specific styles for IndexPage */
+@media (min-width: 768px) {
+  .pagesubtitle {
+    font-size: 1.6rem;
+  }
+}
+
+.heading-23 {
+  font-family: 'Inter', sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.indicationparagraph {
+  font-family: 'Inter', sans-serif;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+}
+
+/* Processing Page Styles - Matching Webflow Design */
+.processingheader {
+  font-family: 'Inter', sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.filesuploaded {
+  /* File list container */
+}
+
+/* Custom scrollbar styling for file list */
+.filesuploaded::-webkit-scrollbar {
+  width: 6px;
+}
+
+.filesuploaded::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.filesuploaded::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+.filesuploaded::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.uploadedfile {
+  /* Individual file row */
+  padding: 0.5rem 0;
+}
+
+.fileicon {
+  flex-shrink: 0;
+}
+
+.files {
+  font-family: 'Inter', sans-serif;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.dropdownwrapper {
+  user-select: none;
+}
+
+.dropdownicon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.addbutton {
+  font-family: 'Inter', sans-serif;
+  border-radius: 9999px;
+  min-width: 200px;
+}
+
+.addbuttonicon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.addbuttontext {
+  font-family: 'Inter', sans-serif;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Loading Page Styles - Matching Webflow Design */
+.loadingtitle {
+  /* Title container */
+}
+
+.loadingheader {
+  font-family: 'Inter', sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.loadingfiles {
+  font-family: 'Inter', sans-serif;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.loadingmeter {
+  position: relative;
+  border-radius: 9999px;
+}
+
+.loadingbody {
+  border-radius: 9999px;
+}
+
+.loadingbody.loadingmeter {
+  /* Filled portion - positioned over background */
+  min-width: 0;
+}
+
+.loadingvalue {
+  font-family: 'Inter', sans-serif;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Completed Page Styles - Matching Webflow Design */
+.alerticonwrapper {
+  /* Icon container */
+}
+
+.alerticon {
+  /* Success icon image */
+  object-fit: contain;
+}
