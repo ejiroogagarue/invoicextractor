@@ -20,7 +20,7 @@ import os
 import json
 import time
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # OpenAI imports - will be optional until installed
 try:
@@ -361,6 +361,11 @@ class OpenAIInvoiceExtractor:
         """
         Structure invoice data using hints and raw text with GPT-4o Mini.
         
+        TRUST-FIRST APPROACH:
+        - Sends full text (no artificial truncation) for accurate extraction
+        - Filters $0 values from tables to focus on costs
+        - Ensures all pages are captured for multi-page invoices
+        
         Uses JSON mode to guarantee valid JSON structure.
         GPT maps extracted hints to the schema using its intelligence.
         
@@ -373,30 +378,91 @@ class OpenAIInvoiceExtractor:
         """
         import json as json_module
         
+        def filter_zero_cost_rows(rows: List[List[str]], headers: List[str]) -> List[List[str]]:
+            """
+            Filter out rows where amount/cost columns are $0.
+            
+            This focuses LLM on actual costs and reduces token usage
+            while maintaining accuracy for meaningful data.
+            """
+            if not rows or not headers:
+                return rows
+            
+            # Find amount/cost column indices
+            amount_indices = []
+            for i, header in enumerate(headers):
+                header_lower = header.lower()
+                if any(keyword in header_lower for keyword in ['amount', 'cost', 'total', 'price', 'charge']):
+                    amount_indices.append(i)
+            
+            if not amount_indices:
+                return rows  # Can't filter if no amount column found
+            
+            filtered_rows = []
+            for row in rows:
+                # Check if any amount column has non-zero value
+                has_cost = False
+                for idx in amount_indices:
+                    if idx < len(row):
+                        cell_value = str(row[idx]).strip()
+                        # Remove currency symbols and parse
+                        cell_value = cell_value.replace('$', '').replace(',', '').replace('USD', '').strip()
+                        try:
+                            amount = float(cell_value)
+                            if amount > 0.01:  # More than 1 cent
+                                has_cost = True
+                                break
+                        except (ValueError, TypeError):
+                            # If can't parse, keep the row (might be text)
+                            has_cost = True
+                            break
+                
+                # Only include rows with costs
+                if has_cost:
+                    filtered_rows.append(row)
+            
+            return filtered_rows
+        
         # Format structured tables from pdfplumber for prompt
+        # Filter $0 values to focus on costs and reduce token usage
         # IMPORTANT: Use all_rows instead of sample_rows to capture ALL line items from ALL pages
-        # This fixes the multi-page invoice issue where only first page data was extracted.
-        # Cost impact: Minimal (~$0.0001-0.0002 per invoice) because:
-        # - Tables are already extracted (no additional extraction cost)
-        # - Table rows are token-efficient (structured data vs raw text)
-        # - Only adding ~50-100 rows per invoice (much cheaper than full text)
         tables_detail = ""
         if hints.get('pdfplumber_tables'):
             tables_list = []
+            total_rows_before = 0
+            total_rows_after = 0
+            
             # Process ALL tables (not just first 5) to capture line items from all pages
             for i, t in enumerate(hints['pdfplumber_tables']):
-                table_info = f"Table {i+1} (Page {t['page']}, {t['row_count']} rows"
+                all_rows = t.get('all_rows', [])
+                headers = t.get('headers', [])
+                total_rows_before += len(all_rows)
+                
+                # Filter $0 rows - focus on costs only
+                filtered_rows = filter_zero_cost_rows(all_rows, headers)
+                total_rows_after += len(filtered_rows)
+                
+                if not filtered_rows:
+                    continue  # Skip tables with no costs
+                
+                table_info = f"Table {i+1} (Page {t['page']}, {len(filtered_rows)} cost rows"
                 if t.get('is_multi_page'):
                     table_info += f", spans pages {t.get('page_range', '')}"
                 table_info += "):\n"
-                table_info += f"Headers: {', '.join(t['headers'])}\n"
-                table_info += "All rows:\n"
-                # Use all_rows instead of sample_rows - this captures ALL line items from ALL pages
-                # The table_extractor already extracted all rows from all pages, we just need to use them
-                for row in t.get('all_rows', []):
+                table_info += f"Headers: {', '.join(headers)}\n"
+                table_info += "Rows with costs:\n"
+                
+                # Use filtered rows (costs only)
+                for row in filtered_rows:
                     table_info += "  " + " | ".join(str(cell) for cell in row) + "\n"
                 tables_list.append(table_info)
+            
             tables_detail = "\n".join(tables_list)
+            
+            # Log filtering results
+            if total_rows_before > total_rows_after:
+                filtered_count = total_rows_before - total_rows_after
+                print(f"     ✓ Filtered {filtered_count} $0 rows, kept {total_rows_after} cost rows")
         else:
             # Fallback to simple table detection if pdfplumber didn't find tables
             table_sample = "\n".join([
@@ -406,6 +472,17 @@ class OpenAIInvoiceExtractor:
             tables_detail = table_sample
         
         # Build hints-based prompt
+        # TRUST-FIRST: Send full text (or very high limit) to ensure accurate extraction
+        # Most invoices are < 30000 chars, but we set high limit for multi-page invoices
+        # Cost is minimal compared to value of accurate data extraction
+        text_limit = min(len(raw_text), 50000)  # 50k char limit (covers 10+ page invoices)
+        text_used = raw_text[:text_limit] if len(raw_text) > text_limit else raw_text
+        
+        if len(raw_text) > text_limit:
+            print(f"     ⚠️  Text truncated from {len(raw_text):,} to {text_limit:,} chars (very large invoice)")
+        else:
+            print(f"     ✓ Sending full text ({len(raw_text):,} chars) for accurate extraction")
+        
         user_prompt = HINTS_BASED_PROMPT_TEMPLATE.format(
             json_schema=JSON_SCHEMA,
             currency_amounts=", ".join(hints.get('currency_amounts', [])[:10]),
@@ -414,11 +491,9 @@ class OpenAIInvoiceExtractor:
             invoice_numbers=", ".join(hints.get('potential_invoice_numbers', [])),
             labeled_fields=json_module.dumps(hints.get('labeled_fields', {}), indent=2),
             table_sample=tables_detail,
-            # Increased from 3000 to 5000 chars to ensure full first page is captured
-            # First page typically contains: vendor info, invoice number, dates, header details
-            # This ensures we capture all header context while keeping costs low
-            # Cost impact: ~$0.0001 per invoice (minimal increase)
-            raw_text=raw_text[:5000]  # Full first page + start of page 2 if needed
+            # TRUST-FIRST: Full text (or 50k limit) ensures accurate extraction
+            # This prioritizes accuracy and trust over cost optimization
+            raw_text=text_used
         )
         
         last_error: Exception = None
