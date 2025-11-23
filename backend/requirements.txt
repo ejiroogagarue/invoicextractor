@@ -7,3 +7,6 @@ PyMuPDF
 pytesseract
 Pillow
 python-dotenv
+pdfplumber>=0.10.0
+unstructured
+beautifulsoup4
