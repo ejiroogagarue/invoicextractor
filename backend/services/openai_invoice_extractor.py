@@ -34,7 +34,11 @@ except ImportError:
 from services.text_extractor import TextExtractor, PageText
 from services.universal_feature_extractor import UniversalFeatureExtractor
 from services.layout_extractor import LayoutExtractor
+from services.performance_tracker import get_tracker
+from services.deterministic_extractor import DeterministicExtractor
 
+LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "3")))
+LLM_STAGE_SEMAPHORE = asyncio.Semaphore(LLM_MAX_CONCURRENT)
 
 # ═══════════════════════════════════════════════════════════
 # PROMPTS (Reused from Gemini for consistency)
@@ -194,16 +198,23 @@ class OpenAIInvoiceExtractor:
         # Initialize universal feature extractor (hints-based extraction)
         self.feature_extractor = UniversalFeatureExtractor()
         
+        # Initialize deterministic extractor (Phase 3: regex-based extraction)
+        self.deterministic_extractor = DeterministicExtractor()
+        
         # Model configuration
         self.model = "gpt-4o-mini"  # Fast, cost-effective model
         self._model = self.model  # For compatibility with performance tracking
         self.temperature = 0.1  # Low temperature for consistent results
-        self.timeout = 60.0  # 60s timeout (same as Gemini for complex documents)
+        self.timeout = 120.0  # 120s timeout (increased for complex documents)
         self.max_retries = 3  # Retry failed requests
         self.max_rows_per_table = 30  # Limit rows per table sent to LLM
-        self.max_rows_per_chunk = 60   # Max total rows per LLM chunk
+        self.max_rows_per_chunk = 30   # Reduced from 60 to 30 for faster LLM responses
         self.page_summary_chars = 350  # Characters per page summary after page 1
-        self.max_concurrent_chunks = 3  # Parallel chunk requests per invoice
+        self.max_concurrent_chunks = 5  # Increased from 3 to 5 for more parallelism
+        
+        # Token tracking
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
     
     async def extract_invoice(
         self,
@@ -244,6 +255,10 @@ class OpenAIInvoiceExtractor:
             "model": self.model
         }
         start_time = time.time()
+        
+        # Reset token counters for this invoice
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
         
         # ═══════════════════════════════════════════════════════════
         # STAGE 1: Text Extraction (0.1-0.5s for text PDFs, ~500ms per page for scanned PDFs)
@@ -342,14 +357,23 @@ class OpenAIInvoiceExtractor:
         hints["layout_metadata"] = layout_data.get("metadata", {})
         hints["tables_detected"] = len(layout_tables)
         
+        # PHASE 3: Use new deterministic extractor
         (
             deterministic_items,
-            financial_rows,
+            ambiguous_rows,
             deterministic_stats,
-        ) = self._extract_deterministic_items(layout_tables)
+        ) = self.deterministic_extractor.extract_line_items(layout_tables)
+        
+        print(f"     → Deterministic extraction: {len(deterministic_items)} items, {len(ambiguous_rows)} ambiguous rows")
+        print(f"       Deterministic percentage: {len(deterministic_items) / max(deterministic_stats.get('rows_scanned', 1), 1) * 100:.1f}%")
+        
         hints["deterministic_line_items"] = deterministic_items
-        hints["financial_row_hints"] = financial_rows
+        hints["ambiguous_rows"] = ambiguous_rows
         hints["deterministic_stats"] = deterministic_stats
+        
+        # Still extract financial rows for summary
+        financial_rows = self._extract_financial_rows(layout_tables)
+        hints["financial_row_hints"] = financial_rows
         
         perf["hint_extraction_time"] = (time.perf_counter() - extract_start) * 1000
         print(f"     ✓ Hints extracted in {perf['hint_extraction_time']:.0f}ms")
@@ -360,34 +384,50 @@ class OpenAIInvoiceExtractor:
         print(f"  → Stage 3: Mapping hints with GPT-4o Mini (timeout: {self.timeout:.0f}s)...")
         api_start = time.perf_counter()
         
-        # Send hints + raw text for intelligent mapping
-        invoice_json = await self._structure_with_chunks(hints, condensed_text)
+        llm_wait_start = time.perf_counter()
+        async with LLM_STAGE_SEMAPHORE:
+            perf["llm_queue_wait"] = (time.perf_counter() - llm_wait_start) * 1000
+            # Send hints + raw text for intelligent mapping
+            invoice_json = await self._structure_with_chunks(hints, condensed_text)
         invoice_json.setdefault("line_items", [])
         for item in invoice_json["line_items"]:
             item.setdefault("_source", "llm")
         
+        # PHASE 3: Prioritize deterministic items (add them first)
         deterministic_items = hints.get('deterministic_line_items', [])
-        deterministic_appended = 0
-        if deterministic_items:
-            existing_keys = set()
-            for item in invoice_json.get("line_items", []):
-                key = (
-                    (item.get("item_name") or "").strip().lower(),
-                    str(item.get("amount")),
-                )
+        
+        # Start with deterministic items
+        invoice_json.setdefault("line_items", []).extend(deterministic_items)
+        
+        # Track which items came from deterministic extraction
+        deterministic_appended = len(deterministic_items)
+        
+        if deterministic_appended:
+            print(f"     ✓ Added {deterministic_appended} deterministic line items (regex-based, FREE)")
+        
+        # Merge LLM items (avoiding duplicates)
+        llm_items_added = 0
+        existing_keys = set()
+        for item in deterministic_items:
+            key = (
+                (item.get("item_name") or "").strip().lower(),
+                str(item.get("amount")),
+            )
+            existing_keys.add(key)
+        
+        # Add LLM items that aren't duplicates
+        llm_items = [item for item in invoice_json.get("line_items", []) if item.get("_source") == "llm"]
+        for item in llm_items:
+            key = (
+                (item.get("item_name") or "").strip().lower(),
+                str(item.get("amount")),
+            )
+            if key not in existing_keys:
+                llm_items_added += 1
                 existing_keys.add(key)
-            for item in deterministic_items:
-                key = (
-                    (item.get("item_name") or "").strip().lower(),
-                    str(item.get("amount")),
-                )
-                if key in existing_keys:
-                    continue
-                invoice_json.setdefault("line_items", []).append(item)
-                existing_keys.add(key)
-                deterministic_appended += 1
-            if deterministic_appended:
-                print(f"     ✓ Added {deterministic_appended} deterministic line items (rule-based)")
+        
+        if llm_items_added:
+            print(f"     ✓ Added {llm_items_added} LLM items (for ambiguous rows)")
         
         financial_rows = hints.get("financial_row_hints", [])
         self._apply_financial_hints(invoice_json, financial_rows)
@@ -460,7 +500,48 @@ class OpenAIInvoiceExtractor:
         if perf.get("table_performance"):
             performance["table_performance"] = perf["table_performance"]
         
+        # Add token usage to performance metrics
+        performance["input_tokens"] = self._total_input_tokens
+        performance["output_tokens"] = self._total_output_tokens
+        performance["total_tokens"] = self._total_input_tokens + self._total_output_tokens
+        
         print(f"     ✓ Total: {duration:.2f}s")
+        print(f"     ✓ Tokens: {self._total_input_tokens:,} input + {self._total_output_tokens:,} output = {self._total_input_tokens + self._total_output_tokens:,} total")
+        
+        # ═══════════════════════════════════════════════════════════
+        # Performance Tracking (for metrics collection)
+        # ═══════════════════════════════════════════════════════════
+        tracker = get_tracker()
+        tracker.track_invoice(
+            filename=filename,
+            system_version="phase3",  # Phase 3: Hybrid Extraction
+            stage_times={
+                "layout": perf.get("layout_extraction_time", 0) / 1000,  # Convert ms to seconds
+                "deterministic": perf.get("hint_extraction_time", 0) / 1000,
+                "llm": perf.get("api_call_time", 0) / 1000,
+                "validation": perf.get("json_parse_time", 0) / 1000,
+            },
+            token_usage={
+                "input_tokens": self._total_input_tokens,
+                "output_tokens": self._total_output_tokens,
+            },
+            extraction_stats={
+                "total_items": len(invoice_json.get("line_items", [])),
+                "deterministic_items": invoice_json.get("line_item_coverage", {}).get("deterministic_appended", 0),
+                "llm_items": len(invoice_json.get("line_items", [])) - invoice_json.get("line_item_coverage", {}).get("deterministic_appended", 0),
+            },
+            quality_metrics={
+                "validation_pass": invoice_json.get("extraction_confidence", 0) > 0.7,
+                "confidence_score": invoice_json.get("extraction_confidence", 0),
+            },
+            metadata={
+                "page_count": len(pages),
+                "chunk_count": chunk_count,
+                "layout_source": "unstructured" if layout_tables and not fallback_table_perf else "pdfplumber",
+            },
+            success=True,
+            error_message=None
+        )
         
         return {
             "result_json": invoice_json,
@@ -479,6 +560,33 @@ class OpenAIInvoiceExtractor:
                 if keyword in cleaned:
                     return idx
         return None
+    
+    def _extract_financial_rows(self, tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Extract financial summary rows (subtotals, tax, etc.) from tables."""
+        financial_rows: List[Dict[str, Any]] = []
+        
+        for table in tables or []:
+            rows = table.get("all_rows", []) or []
+            annotations = table.get("row_annotations", []) or []
+            
+            for row_index, row in enumerate(rows):
+                if not row:
+                    continue
+                
+                annotation = annotations[row_index] if row_index < len(annotations) else {}
+                row_type = annotation.get("row_type", "line_item")
+                
+                if row_type in {"subtotal", "discount", "tax", "total", "shipping", "deposit", "fee"}:
+                    financial_rows.append({
+                        "row_type": row_type,
+                        "amount": annotation.get("amount"),
+                        "raw_text": annotation.get("raw_text") or " | ".join(str(cell) for cell in row),
+                        "page": table.get("page"),
+                        "section_label": table.get("section_label"),
+                        "table_id": table.get("table_id"),
+                    })
+        
+        return financial_rows
     
     def _extract_deterministic_items(
         self,
@@ -1082,6 +1190,11 @@ class OpenAIInvoiceExtractor:
                     response_format={"type": "json_object"},  # Force JSON mode
                     timeout=self.timeout,
                 )
+                
+                # Track token usage
+                if hasattr(response, 'usage') and response.usage:
+                    self._total_input_tokens += response.usage.prompt_tokens
+                    self._total_output_tokens += response.usage.completion_tokens
                 
                 # Extract JSON from response
                 content = response.choices[0].message.content

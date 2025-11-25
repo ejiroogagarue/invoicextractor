@@ -11,6 +11,8 @@ Motivation:
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 import fitz  # PyMuPDF for rendering pages into images
 import re
 from dataclasses import dataclass, field
@@ -115,6 +117,7 @@ class LayoutExtractor:
         self.zoom = zoom
         self.max_pages = max_pages
         self.money_regex = re.compile(r"-?\$?\s*\d[\d,]*\.?\d*")
+        self.page_worker_limit = max(1, int(os.getenv("LAYOUT_PAGE_WORKERS", "4")))
 
     async def extract(self, file_bytes: bytes, mime_type: str) -> Dict[str, Any]:
         """
@@ -128,18 +131,25 @@ class LayoutExtractor:
                 "metadata": {...}
             }
         """
-        if not UNSTRUCTURED_AVAILABLE:
-            print("⚠️  Unstructured not installed - layout stage disabled.")
-            return self._empty_payload("unavailable")
-
-        if mime_type == "application/pdf":
-            return await self._extract_pdf(file_bytes)
-
-        if mime_type.startswith("image/"):
-            return await self._extract_image(file_bytes)
-
-        print(f"⚠️  Unsupported MIME type for layout extraction: {mime_type}")
-        return self._empty_payload("unsupported")
+        # PHASE 3 OPTIMIZATION: Disable unstructured (179s bottleneck)
+        # The table-transformer model has issues ("Cannot copy out of meta tensor")
+        # pdfplumber fallback is faster and more reliable for our use case
+        print("⚠️  Layout extraction disabled (using fast pdfplumber fallback)")
+        return self._empty_payload("disabled_phase3_optimization")
+        
+        # Original code (kept for reference):
+        # if not UNSTRUCTURED_AVAILABLE:
+        #     print("⚠️  Unstructured not installed - layout stage disabled.")
+        #     return self._empty_payload("unavailable")
+        #
+        # if mime_type == "application/pdf":
+        #     return await self._extract_pdf(file_bytes)
+        #
+        # if mime_type.startswith("image/"):
+        #     return await self._extract_image(file_bytes)
+        #
+        # print(f"⚠️  Unsupported MIME type for layout extraction: {mime_type}")
+        # return self._empty_payload("unsupported")
 
     async def _extract_pdf(self, file_bytes: bytes) -> Dict[str, Any]:
         document = fitz.open(stream=file_bytes, filetype="pdf")
@@ -158,18 +168,38 @@ class LayoutExtractor:
         tables: List[LayoutTable] = []
         sections: List[Dict[str, Any]] = []
         element_count = 0
+        page_timings: List[Dict[str, Any]] = []
 
-        for page_index, image_bytes, dimensions in images:
-            elements = await self._partition_image(image_bytes)
+        page_semaphore = asyncio.Semaphore(min(self.page_worker_limit, max(1, len(images))))
+
+        async def process_page(entry: Tuple[int, bytes, Tuple[float, float]]):
+            page_index, image_bytes, dimensions = entry
+            start = time.perf_counter()
+            async with page_semaphore:
+                elements = await self._partition_image(image_bytes)
             normalized_page = self._normalize_page(
                 page_index=page_index,
                 elements=elements,
                 dimensions=dimensions,
             )
+            duration_ms = (time.perf_counter() - start) * 1000
+            return page_index, normalized_page, duration_ms
+
+        page_results = await asyncio.gather(*(process_page(entry) for entry in images))
+        page_results.sort(key=lambda item: item[0])
+
+        for _, normalized_page, duration_ms in page_results:
             pages.append(normalized_page["page"])
             tables.extend(normalized_page["tables"])
             sections.extend(normalized_page["sections"])
             element_count += normalized_page["element_count"]
+            page_number = normalized_page["page"]["page_number"]
+            page_timings.append(
+                {
+                    "page": page_number,
+                    "duration_ms": round(duration_ms, 2),
+                }
+            )
 
         merged_tables = self._merge_tables(tables)
         metadata = {
@@ -178,6 +208,8 @@ class LayoutExtractor:
             "pages_processed": len(pages),
             "tables_detected": len(merged_tables),
             "elements_detected": element_count,
+            "page_timings": page_timings,
+            "page_workers": self.page_worker_limit,
         }
 
         return {
@@ -211,16 +243,31 @@ class LayoutExtractor:
     async def _partition_image(self, image_bytes: bytes) -> List[Any]:
         if not partition_image:
             return []
-        try:
+
+        async def _run_with_strategy(strategy: str):
             return await asyncio.to_thread(
                 partition_image,
                 file=BytesIO(image_bytes),
                 infer_table_structure=True,
-                strategy="fast",
+                strategy=strategy,
             )
-        except Exception as exc:  # pragma: no cover - safety
-            print(f"  ⚠️  Unstructured.partition_image failed: {exc}")
-            return []
+
+        strategies = ["fast", "auto", "hi_res"]
+        last_error: Exception | None = None
+
+        for strategy in strategies:
+            try:
+                return await _run_with_strategy(strategy)
+            except Exception as exc:  # pragma: no cover - safety
+                last_error = exc
+                # The fast strategy is not supported for images; try the next option.
+                if "fast strategy is not available" not in str(exc).lower():
+                    print(f"  ⚠️  Unstructured.partition_image failed ({strategy}): {exc}")
+                    break
+
+        if last_error:
+            print(f"  ⚠️  Unstructured.partition_image failed: {last_error}")
+        return []
 
     def _normalize_page(
         self,
