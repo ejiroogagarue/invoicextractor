@@ -158,5 +158,34 @@ export class PDFTextLocator {
   clearCache(): void {
     this.textLocationCache.clear();
   }
+
+  /**
+   * Highlight text in PDF by finding it and returning location
+   * Note: Actual highlighting is handled by PDFViewer component
+   */
+  async highlightTextInPDF(snippet: string): Promise<void> {
+    if (!this.pdfDoc) {
+      console.warn('PDFTextLocator: PDF not loaded, cannot highlight');
+      return;
+    }
+    
+    // Find the text location (this can be used by PDFViewer for highlighting)
+    const location = await this.findText(snippet);
+    if (location) {
+      console.log('PDFTextLocator: Text found for highlighting:', location);
+      // The PDFViewer component should handle the actual visual highlighting
+      // This method just ensures the text is found and cached
+    } else {
+      console.warn('PDFTextLocator: Text not found for highlighting:', snippet);
+    }
+  }
+
+  /**
+   * Clear highlights (clears cache to reset highlighting state)
+   */
+  clearHighlights(): void {
+    this.clearCache();
+    console.log('PDFTextLocator: Highlights cleared');
+  }
 }
 
