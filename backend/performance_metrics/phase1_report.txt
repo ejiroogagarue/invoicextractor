@@ -1,0 +1,20 @@
+======================================================================
+INVOICE EXTRACTION PERFORMANCE REPORT
+======================================================================
+Generated: 2025-11-23 19:30:32
+Total invoices tested: 1
+
+----------------------------------------------------------------------
+SYSTEM: PHASE1
+----------------------------------------------------------------------
+Invoices: 1
+
+Average processing time: 232.3s
+Average cost per invoice: $0.00660
+Average tokens used: 26992
+Average line items: 77
+Deterministic extraction: 0.0%
+Success rate: 100.0%
+
+Individual Results:
+  ✓ IR-0001394_Order_for_Vinny_June_27_2025_Invoice_1483.pdf: 232.3s, $0.00660, 77 items, 0% deterministic

@@ -31,7 +31,7 @@ CONNECTIONS:
 """
 
 from typing import List, Any, Dict
-from fastapi import APIRouter, File, UploadFile, HTTPException, Header, Body
+from fastapi import APIRouter, File, UploadFile, HTTPException, Header
 from fastapi.responses import JSONResponse
 # OCR Provider abstraction
 from services.invoice_extractor import (
@@ -47,7 +47,6 @@ from services.validation import (
     determine_review_status,
     parse_currency
 )
-from services.batch_processor import BatchProcessingManager
 import time 
 import asyncio
 import uuid
@@ -757,13 +756,16 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
     print(f"\n⚙️  Starting concurrent processing of {len(files)} files...")
     ocr_start = time_module.time()
     
-    batch_manager = BatchProcessingManager(max_workers=max(1, _ocr_settings.max_concurrency))
+    semaphore = asyncio.Semaphore(max(1, _ocr_settings.max_concurrency))
 
-    async def _run_job(upload_file: UploadFile):
-        return await _process_single_invoice(upload_file, _invoice_extractor)
+    async def _guarded_process(upload_file: UploadFile):
+        async with semaphore:
+            return await _process_single_invoice(upload_file, _invoice_extractor)
 
-    # Wait for all files to be processed
-    results, progress_snapshot = await batch_manager.process(files, _run_job)
+    tasks = [_guarded_process(file) for file in files]
+
+    # Wait for all files to be processed 
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     
     perf_timings['ocr_time'] = (time_module.time() - ocr_start) * 1000  # Convert to ms
     print(f"✓ OCR extraction complete: {perf_timings['ocr_time']:.2f}ms")
@@ -865,7 +867,6 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
     #--- Finalize the summary ----
     aggregated_data["summary"]["vendors"] = list(aggregated_data["summary"]["vendors"])
     aggregated_data["summary"]["total_amount"] = f"{aggregated_data['summary']['total_amount']:,.2f}"
-    aggregated_data["progress"] = progress_snapshot
     
     # Calculate average confidence across all processed invoices
     total_confidence = sum(
@@ -966,55 +967,6 @@ async def extract_invoice_data_batch(files: List[UploadFile] = File(...)):
     return JSONResponse(content=aggregated_data)
 # --- END NEW ENDPOINT
 
-
-# ========================================================================
-# ENDPOINT: Update Invoice Fields
-# ========================================================================
-@router.patch("/invoice/{invoice_id}")
-async def update_invoice(invoice_id: str, updates: Dict[str, Any] = Body(...)):
-    """
-    Updates specific fields of an invoice.
-    
-    Accepts partial updates to invoice fields like vendor, date, total, status, etc.
-    For now, this is a simple endpoint that validates and returns success.
-    In production, this would persist to a database.
-    
-    Args:
-        invoice_id: The invoice ID (from aggregatedData.invoices)
-        updates: Dictionary of fields to update (e.g., {"vendor": "New Vendor", "total": 1234.56})
-    
-    Returns:
-        Success confirmation with updated fields
-    """
-    try:
-        # Validate updates
-        allowed_fields = {
-            'vendor', 'vendor_name', 'date', 'total_amount', 'total',
-            'status', 'review_status', 'invoice_number', 'subtotal',
-            'shipping', 'discount_amount', 'tax'
-        }
-        
-        # Filter to only allowed fields
-        valid_updates = {k: v for k, v in updates.items() if k in allowed_fields}
-        
-        if not valid_updates:
-            raise HTTPException(status_code=400, detail="No valid fields to update")
-        
-        # Normalize field names
-        if 'total' in valid_updates and 'total_amount' not in valid_updates:
-            valid_updates['total_amount'] = valid_updates.pop('total')
-        if 'vendor' in valid_updates and 'vendor_name' not in valid_updates:
-            valid_updates['vendor_name'] = valid_updates.pop('vendor')
-        
-        # Return success (frontend handles actual state update)
-        return JSONResponse(content={
-            "success": True,
-            "invoice_id": invoice_id,
-            "updated_fields": valid_updates,
-            "message": "Invoice updated successfully"
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update invoice: {str(e)}")
 
 
     

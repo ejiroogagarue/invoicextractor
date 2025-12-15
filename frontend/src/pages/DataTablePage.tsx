@@ -6,7 +6,7 @@
 
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { Search, Download, ChevronDown, CheckCircle2, AlertTriangle, ArrowUpDown, Plus, X } from 'lucide-react'
+import { Search, Download, ChevronDown, CheckCircle2, AlertTriangle, ArrowUpDown, Plus, X, Grid3x3, List } from 'lucide-react'
 import { motion } from 'framer-motion'
 import axios from 'axios'
 import Header from '../components/Header'
@@ -63,6 +63,7 @@ interface AggregatedData {
 
 type SortField = 'vendor' | 'invoiceCount' | 'date' | 'total' | 'status'
 type SortDirection = 'asc' | 'desc'
+type ViewMode = 'table' | 'grid'
 type RowState = {
   status: 'processing' | 'completed' | 'failed'
   progress: number

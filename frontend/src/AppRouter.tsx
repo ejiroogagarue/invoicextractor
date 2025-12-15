@@ -3,6 +3,8 @@ import IndexPage from './pages/IndexPage'
 import ProcessingPage from './pages/ProcessingPage'
 import DataTablePage from './pages/DataTablePage'
 import ReviewPage from './pages/ReviewPage'
+import InvoiceGeneratorPage from './pages/InvoiceGeneratorPage'
+import BadFormPage from './pages/BadFormPage'
 
 function AppRouter() {
   return (
@@ -12,6 +14,8 @@ function AppRouter() {
         <Route path="/processing" element={<ProcessingPage />} />
         <Route path="/datatable" element={<DataTablePage />} />
         <Route path="/review" element={<ReviewPage />} />
+        <Route path="/invoice-generator" element={<InvoiceGeneratorPage />} />
+        <Route path="/bad-form" element={<BadFormPage />} />
       </Routes>
     </BrowserRouter>
   )

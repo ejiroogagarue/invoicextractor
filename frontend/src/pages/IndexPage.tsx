@@ -21,7 +21,7 @@ export default function IndexPage() {
     }
   }, [navigate])
 
-  const { getRootProps, getInputProps, isDragActive: dropzoneDragActive } = useDropzone({
+  const { getRootProps, getInputProps, isDragActive: dropzoneDragActive, open } = useDropzone({
     onDrop,
     accept: {
       'application/pdf': ['.pdf']
@@ -30,7 +30,14 @@ export default function IndexPage() {
     multiple: true,
     onDragEnter: () => setIsDragActive(true),
     onDragLeave: () => setIsDragActive(false),
+    noClick: false,
+    noKeyboard: false,
   })
+
+  const handleBrowseClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    open()
+  }, [open])
 
   return (
     <div className="upload-page min-h-screen bg-ogaga-yellow flex flex-col">
@@ -99,8 +106,66 @@ export default function IndexPage() {
           </div>
         </div>
 
+        {/* Neumorphic Browse Files Button */}
+        <button
+          onClick={handleBrowseClick}
+          className="
+            neoboxout neoboxout-hover
+            mt-6 md:mt-8 px-8 md:px-12 py-3 md:py-4
+            rounded-xl md:rounded-2xl
+            cursor-pointer border border-black/10
+            transition-all duration-300 ease-out
+            focus:outline-none focus:ring-2 focus:ring-black/20 focus:ring-offset-2 focus:ring-offset-ogaga-yellow
+          "
+          style={{
+            boxShadow: `
+              0 10px 25px rgba(0, 0, 0, 0.22),
+              inset 0 1px 0 rgba(255, 255, 255, 0.1),
+              0 0 0 1px rgba(0, 0, 0, 0.05)
+            `,
+            background: 'linear-gradient(135deg, #ffc300 0%, #ffc300 100%)',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.transform = 'translateY(-3px) scale(1.005)'
+            e.currentTarget.style.boxShadow = `
+              0 14px 30px rgba(0, 0, 0, 0.25),
+              inset 0 1px 2px rgba(255, 255, 255, 0.15),
+              0 0 0 1px rgba(0, 0, 0, 0.08)
+            `
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.transform = 'translateY(0) scale(1)'
+            e.currentTarget.style.boxShadow = `
+              0 10px 25px rgba(0, 0, 0, 0.22),
+              inset 0 1px 0 rgba(255, 255, 255, 0.1),
+              0 0 0 1px rgba(0, 0, 0, 0.05)
+            `
+          }}
+          onMouseDown={(e) => {
+            e.currentTarget.style.transform = 'translateY(-1px) scale(0.998)'
+            e.currentTarget.style.boxShadow = `
+              0 8px 20px rgba(0, 0, 0, 0.18),
+              inset 0 1px 0 rgba(255, 255, 255, 0.1),
+              0 0 0 1px rgba(0, 0, 0, 0.05)
+            `
+          }}
+          onMouseUp={(e) => {
+            e.currentTarget.style.transform = 'translateY(-3px) scale(1.005)'
+            e.currentTarget.style.boxShadow = `
+              0 14px 30px rgba(0, 0, 0, 0.25),
+              inset 0 1px 2px rgba(255, 255, 255, 0.15),
+              0 0 0 1px rgba(0, 0, 0, 0.08)
+            `
+          }}
+          aria-label="Browse and select PDF files"
+        >
+          <span className="font-semibold text-base md:text-lg text-black">
+            Browse Files
+          </span>
+        </button>
+
         {/* Footer Indication */}
-        <p className="indicationparagraph text-sm md:text-base text-black/80 mt-6 md:mt-8">
+        <p className="indicationparagraph text-sm md:text-base text-black/80 mt-4 md:mt-6">
           PDF only - up to 10MB
         </p>
       </div>

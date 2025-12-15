@@ -15,7 +15,8 @@ interface MasterTableProps {
   line_items: LineItem[];
 }
 
-const MasterTable: React.FC<MasterTableProps> = ({ line_items }) => {
+// Currently unused component - kept for future master table feature
+const _MasterTable: React.FC<MasterTableProps> = ({ line_items }) => {
   const [editedItems, setEditedItems] = useState(line_items);
 
   const handleCellEdit = (id: string, field: keyof LineItem, value: string) => {
@@ -139,3 +140,5 @@ const MasterTable: React.FC<MasterTableProps> = ({ line_items }) => {
     </div>
   );
 };
+
+export default _MasterTable;

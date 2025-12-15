@@ -92,10 +92,17 @@ export default function ProcessingPage() {
     // Get actual File objects from location state
     const actualFiles = location.state?.files || []
     if (actualFiles.length === 0) {
-      navigate('/loading', { state: { files: actualFiles } })
+      navigate('/')
       return
     }
-    navigate('/loading', { state: { files: actualFiles } })
+    
+    // Navigate directly to DataTable with processing flag
+    navigate('/datatable', { 
+      state: { 
+        files: actualFiles,
+        shouldStartProcessing: true
+      } 
+    })
   }, [location.state, navigate])
 
   return (
